@@ -27,9 +27,10 @@
 
 .EXAMPLE
     .\Grant-ManagedIdentityPermissions.ps1 `
-        -ManagedIdentityObjectId "b183a485-1c09-47ae-96de-4dd4a0f4dada" `
+        -ManagedIdentityObjectId "aaaaaaaaaaa-bbbb-cccc-eeee-ddddddddddd" `
         -KeyVaultResourceIds @(
-            "/subscriptions/20836408-7996-49cf-803b-d479a4041a48/resourceGroups/rg-logicApps/providers/Microsoft.KeyVault/vaults/kv-logicApps-test-01"
+            "/subscriptions/<your-sub-id/resourceGroups/<your-rg-group/providers/Microsoft.KeyVault/vaults/your-kv-01",
+            "/subscriptions/<your-sub-id/resourceGroups/<your-rg-group/providers/Microsoft.KeyVault/vaults/your-kv-02"
         )
 #>
 
