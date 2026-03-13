@@ -9,9 +9,9 @@ A Logic App (Consumption) workflow that automatically discovers app registration
    ```json
    {"keyVaultName": "kv-contoso-prod", "secretName": "my-app-client-secret"}
    ```
-3. **New secret sync** — If a configured secret has no corresponding Key Vault secret (404), a new credential is created on the app registration and pushed to the target Key Vault.
+3. **Duplicate detection** — Only the newest credential per configuration is processed. Older credentials with the same `displayName` are skipped to prevent duplicate secret creation.
 4. **Expiry rotation** — If a configured secret expires within 30 days (configurable), a new credential is created and pushed to Key Vault. The old secret is kept for zero-downtime rotation.
-5. **Email report** *(optional)* — If an Office 365 API connection is configured, an HTML email is sent showing rotated secrets, new syncs, errors, and unconfigured app registrations.
+5. **Email report** *(optional)* — If an Office 365 API connection is configured, an HTML email is sent showing rotated secrets, errors, and unconfigured app registrations.
 
 ## Prerequisites
 
@@ -75,7 +75,7 @@ See [Grant-ManagedIdentityPermissions.ps1](Grant-ManagedIdentityPermissions.ps1)
 To enroll an app registration's secret for automatic rotation:
 
 1. Go to **Entra ID** > **App registrations** > select your app > **Certificates & secrets**.
-2. Add a new client secret.
+2. Add a new client secret (or edit an existing one).
 3. Set the **Description** field to:
    ```json
    {"keyVaultName": "your-keyvault-name", "secretName": "desired-secret-name"}
