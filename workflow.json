@@ -1,0 +1,591 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "triggers": {
+      "Daily_Recurrence": {
+        "type": "Recurrence",
+        "recurrence": {
+          "frequency": "Day",
+          "interval": 1,
+          "schedule": {
+            "hours": ["6"],
+            "minutes": ["0"]
+          },
+          "timeZone": "UTC"
+        }
+      }
+    },
+    "actions": {
+      "Initialize_RotatedSecrets": {
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "rotatedSecrets",
+              "type": "array",
+              "value": []
+            }
+          ]
+        },
+        "runAfter": {}
+      },
+      "Initialize_NewSecrets": {
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "newSecrets",
+              "type": "array",
+              "value": []
+            }
+          ]
+        },
+        "runAfter": {
+          "Initialize_RotatedSecrets": ["Succeeded"]
+        }
+      },
+      "Initialize_UnconfiguredApps": {
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "unconfiguredApps",
+              "type": "array",
+              "value": []
+            }
+          ]
+        },
+        "runAfter": {
+          "Initialize_NewSecrets": ["Succeeded"]
+        }
+      },
+      "Initialize_Errors": {
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "errors",
+              "type": "array",
+              "value": []
+            }
+          ]
+        },
+        "runAfter": {
+          "Initialize_UnconfiguredApps": ["Succeeded"]
+        }
+      },
+      "Initialize_NextLink": {
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "nextLink",
+              "type": "string",
+              "value": "https://graph.microsoft.com/v1.0/applications?$select=id,appId,displayName,passwordCredentials&$top=100"
+            }
+          ]
+        },
+        "runAfter": {
+          "Initialize_Errors": ["Succeeded"]
+        }
+      },
+      "Initialize_ThresholdDate": {
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "thresholdDate",
+              "type": "string",
+              "value": "@{addDays(utcNow(), int(coalesce(parameters('expiryThresholdDays'), '30')))}"
+            }
+          ]
+        },
+        "runAfter": {
+          "Initialize_NextLink": ["Succeeded"]
+        }
+      },
+      "Initialize_SecretValidityYears": {
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "newSecretEndDate",
+              "type": "string",
+              "value": "@{addToTime(utcNow(), int(coalesce(parameters('secretValidityYears'), '1')), 'Year')}"
+            }
+          ]
+        },
+        "runAfter": {
+          "Initialize_ThresholdDate": ["Succeeded"]
+        }
+      },
+      "Paginate_All_Applications": {
+        "type": "Until",
+        "expression": "@equals(variables('nextLink'), '')",
+        "limit": {
+          "count": 100,
+          "timeout": "PT1H"
+        },
+        "actions": {
+          "Get_Applications_Page": {
+            "type": "Http",
+            "inputs": {
+              "method": "GET",
+              "uri": "@variables('nextLink')",
+              "authentication": {
+                "type": "ManagedServiceIdentity",
+                "audience": "https://graph.microsoft.com"
+              },
+              "retryPolicy": {
+                "type": "exponential",
+                "count": 3,
+                "interval": "PT10S",
+                "maximumInterval": "PT1M",
+                "minimumInterval": "PT5S"
+              }
+            },
+            "runAfter": {}
+          },
+          "For_Each_Application": {
+            "type": "Foreach",
+            "foreach": "@body('Get_Applications_Page')?['value']",
+            "actions": {
+              "Filter_Configured_Secrets": {
+                "type": "Query",
+                "inputs": {
+                  "from": "@coalesce(items('For_Each_Application')?['passwordCredentials'], json('[]'))",
+                  "where": "@and(not(equals(item()?['displayName'], null)), contains(coalesce(item()?['displayName'], ''), 'keyVaultName'), contains(coalesce(item()?['displayName'], ''), 'secretName'))"
+                },
+                "runAfter": {}
+              },
+              "Check_If_Configured": {
+                "type": "If",
+                "expression": {
+                  "and": [
+                    {
+                      "greater": [
+                        "@length(body('Filter_Configured_Secrets'))",
+                        0
+                      ]
+                    }
+                  ]
+                },
+                "actions": {
+                  "Filter_Valid_Secrets": {
+                    "type": "Query",
+                    "inputs": {
+                      "from": "@body('Filter_Configured_Secrets')",
+                      "where": "@greater(item()?['endDateTime'], variables('thresholdDate'))"
+                    },
+                    "runAfter": {}
+                  },
+                  "Check_Has_Valid_Secret": {
+                    "type": "If",
+                    "expression": {
+                      "and": [
+                        {
+                          "equals": [
+                            "@length(body('Filter_Valid_Secrets'))",
+                            0
+                          ]
+                        }
+                      ]
+                    },
+                    "actions": {
+                      "For_Each_Configured_Secret": {
+                    "type": "Foreach",
+                    "foreach": "@body('Filter_Configured_Secrets')",
+                    "actions": {
+                      "Parse_Secret_Config": {
+                        "type": "ParseJson",
+                        "inputs": {
+                          "content": "@items('For_Each_Configured_Secret')?['displayName']",
+                          "schema": {
+                            "type": "object",
+                            "properties": {
+                              "keyVaultName": { "type": "string" },
+                              "secretName": { "type": "string" }
+                            },
+                            "required": ["keyVaultName", "secretName"]
+                          }
+                        },
+                        "runAfter": {}
+                      },
+                      "Check_KV_Secret_Exists": {
+                        "type": "Http",
+                        "inputs": {
+                          "method": "GET",
+                          "uri": "https://@{body('Parse_Secret_Config')?['keyVaultName']}.vault.azure.net/secrets/@{body('Parse_Secret_Config')?['secretName']}?api-version=7.4",
+                          "authentication": {
+                            "type": "ManagedServiceIdentity",
+                            "audience": "https://vault.azure.net"
+                          },
+                          "retryPolicy": {
+                            "type": "exponential",
+                            "count": 3,
+                            "interval": "PT5S",
+                            "maximumInterval": "PT30S",
+                            "minimumInterval": "PT5S"
+                          }
+                        },
+                        "runAfter": {
+                          "Parse_Secret_Config": ["Succeeded"]
+                        }
+                      },
+                      "Route_New_Or_Expiring": {
+                        "type": "If",
+                        "expression": {
+                          "and": [
+                            {
+                              "equals": [
+                                "@outputs('Check_KV_Secret_Exists')['statusCode']",
+                                404
+                              ]
+                            }
+                          ]
+                        },
+                        "actions": {
+                          "Create_New_Secret_For_KV": {
+                            "type": "Http",
+                            "inputs": {
+                              "method": "POST",
+                              "uri": "https://graph.microsoft.com/v1.0/applications/@{items('For_Each_Application')?['id']}/addPassword",
+                              "body": {
+                                "passwordCredential": {
+                                  "displayName": "@{items('For_Each_Configured_Secret')?['displayName']}",
+                                  "endDateTime": "@{variables('newSecretEndDate')}"
+                                }
+                              },
+                              "authentication": {
+                                "type": "ManagedServiceIdentity",
+                                "audience": "https://graph.microsoft.com"
+                              },
+                              "retryPolicy": {
+                                "type": "exponential",
+                                "count": 3,
+                                "interval": "PT10S",
+                                "maximumInterval": "PT1M",
+                                "minimumInterval": "PT5S"
+                              }
+                            },
+                            "runAfter": {}
+                          },
+                          "Push_New_Secret_To_KV": {
+                            "type": "Http",
+                            "inputs": {
+                              "method": "PUT",
+                              "uri": "https://@{body('Parse_Secret_Config')?['keyVaultName']}.vault.azure.net/secrets/@{body('Parse_Secret_Config')?['secretName']}?api-version=7.4",
+                              "body": {
+                                "value": "@{body('Create_New_Secret_For_KV')?['secretText']}",
+                                "attributes": {
+                                  "enabled": true,
+                                  "exp": "@{div(sub(ticks(body('Create_New_Secret_For_KV')?['endDateTime']), ticks('1970-01-01T00:00:00Z')), 10000000)}"
+                                },
+                                "tags": {
+                                  "appRegistrationId": "@{items('For_Each_Application')?['appId']}",
+                                  "appRegistrationName": "@{items('For_Each_Application')?['displayName']}",
+                                  "managedBy": "secret-rotation-logic-app"
+                                }
+                              },
+                              "headers": {
+                                "Content-Type": "application/json"
+                              },
+                              "authentication": {
+                                "type": "ManagedServiceIdentity",
+                                "audience": "https://vault.azure.net"
+                              },
+                              "retryPolicy": {
+                                "type": "exponential",
+                                "count": 3,
+                                "interval": "PT5S",
+                                "maximumInterval": "PT30S",
+                                "minimumInterval": "PT5S"
+                              }
+                            },
+                            "runAfter": {
+                              "Create_New_Secret_For_KV": ["Succeeded"]
+                            }
+                          },
+                          "Append_NewSecret_Record": {
+                            "type": "AppendToArrayVariable",
+                            "inputs": {
+                              "name": "newSecrets",
+                              "value": {
+                                "appName": "@{items('For_Each_Application')?['displayName']}",
+                                "appId": "@{items('For_Each_Application')?['appId']}",
+                                "keyVaultName": "@{body('Parse_Secret_Config')?['keyVaultName']}",
+                                "secretName": "@{body('Parse_Secret_Config')?['secretName']}",
+                                "newExpiry": "@{body('Create_New_Secret_For_KV')?['endDateTime']}"
+                              }
+                            },
+                            "runAfter": {
+                              "Push_New_Secret_To_KV": ["Succeeded"]
+                            }
+                          },
+                          "Log_New_Secret_Error": {
+                            "type": "AppendToArrayVariable",
+                            "inputs": {
+                              "name": "errors",
+                              "value": {
+                                "appName": "@{items('For_Each_Application')?['displayName']}",
+                                "appId": "@{items('For_Each_Application')?['appId']}",
+                                "operation": "NewSecretSync",
+                                "keyVaultName": "@{body('Parse_Secret_Config')?['keyVaultName']}",
+                                "error": "Failed to create or push new secret to Key Vault"
+                              }
+                            },
+                            "runAfter": {
+                              "Create_New_Secret_For_KV": ["Failed", "TimedOut"],
+                              "Push_New_Secret_To_KV": ["Failed", "TimedOut"]
+                            }
+                          }
+                        },
+                        "else": {
+                          "actions": {
+                            "Check_If_Expiring_Soon": {
+                              "type": "If",
+                              "expression": {
+                                "and": [
+                                  {
+                                    "lessOrEquals": [
+                                      "@items('For_Each_Configured_Secret')?['endDateTime']",
+                                      "@variables('thresholdDate')"
+                                    ]
+                                  },
+                                  {
+                                    "greater": [
+                                      "@items('For_Each_Configured_Secret')?['endDateTime']",
+                                      "@utcNow()"
+                                    ]
+                                  }
+                                ]
+                              },
+                              "actions": {
+                                "Create_Rotated_Secret": {
+                                  "type": "Http",
+                                  "inputs": {
+                                    "method": "POST",
+                                    "uri": "https://graph.microsoft.com/v1.0/applications/@{items('For_Each_Application')?['id']}/addPassword",
+                                    "body": {
+                                      "passwordCredential": {
+                                        "displayName": "@{items('For_Each_Configured_Secret')?['displayName']}",
+                                        "endDateTime": "@{variables('newSecretEndDate')}"
+                                      }
+                                    },
+                                    "authentication": {
+                                      "type": "ManagedServiceIdentity",
+                                      "audience": "https://graph.microsoft.com"
+                                    },
+                                    "retryPolicy": {
+                                      "type": "exponential",
+                                      "count": 3,
+                                      "interval": "PT10S",
+                                      "maximumInterval": "PT1M",
+                                      "minimumInterval": "PT5S"
+                                    }
+                                  },
+                                  "runAfter": {}
+                                },
+                                "Update_KV_With_Rotated_Secret": {
+                                  "type": "Http",
+                                  "inputs": {
+                                    "method": "PUT",
+                                    "uri": "https://@{body('Parse_Secret_Config')?['keyVaultName']}.vault.azure.net/secrets/@{body('Parse_Secret_Config')?['secretName']}?api-version=7.4",
+                                    "body": {
+                                      "value": "@{body('Create_Rotated_Secret')?['secretText']}",
+                                      "attributes": {
+                                        "enabled": true,
+                                        "exp": "@{div(sub(ticks(body('Create_Rotated_Secret')?['endDateTime']), ticks('1970-01-01T00:00:00Z')), 10000000)}"
+                                      },
+                                      "tags": {
+                                        "appRegistrationId": "@{items('For_Each_Application')?['appId']}",
+                                        "appRegistrationName": "@{items('For_Each_Application')?['displayName']}",
+                                        "managedBy": "secret-rotation-logic-app",
+                                        "previousExpiry": "@{items('For_Each_Configured_Secret')?['endDateTime']}"
+                                      }
+                                    },
+                                    "headers": {
+                                      "Content-Type": "application/json"
+                                    },
+                                    "authentication": {
+                                      "type": "ManagedServiceIdentity",
+                                      "audience": "https://vault.azure.net"
+                                    },
+                                    "retryPolicy": {
+                                      "type": "exponential",
+                                      "count": 3,
+                                      "interval": "PT5S",
+                                      "maximumInterval": "PT30S",
+                                      "minimumInterval": "PT5S"
+                                    }
+                                  },
+                                  "runAfter": {
+                                    "Create_Rotated_Secret": ["Succeeded"]
+                                  }
+                                },
+                                "Append_Rotated_Record": {
+                                  "type": "AppendToArrayVariable",
+                                  "inputs": {
+                                    "name": "rotatedSecrets",
+                                    "value": {
+                                      "appName": "@{items('For_Each_Application')?['displayName']}",
+                                      "appId": "@{items('For_Each_Application')?['appId']}",
+                                      "keyVaultName": "@{body('Parse_Secret_Config')?['keyVaultName']}",
+                                      "secretName": "@{body('Parse_Secret_Config')?['secretName']}",
+                                      "oldExpiry": "@{items('For_Each_Configured_Secret')?['endDateTime']}",
+                                      "newExpiry": "@{body('Create_Rotated_Secret')?['endDateTime']}"
+                                    }
+                                  },
+                                  "runAfter": {
+                                    "Update_KV_With_Rotated_Secret": ["Succeeded"]
+                                  }
+                                },
+                                "Remove_Old_Secret": {
+                                  "type": "Http",
+                                  "inputs": {
+                                    "method": "POST",
+                                    "uri": "https://graph.microsoft.com/v1.0/applications/@{items('For_Each_Application')?['id']}/removePassword",
+                                    "body": {
+                                      "keyId": "@{items('For_Each_Configured_Secret')?['keyId']}"
+                                    },
+                                    "authentication": {
+                                      "type": "ManagedServiceIdentity",
+                                      "audience": "https://graph.microsoft.com"
+                                    },
+                                    "retryPolicy": {
+                                      "type": "exponential",
+                                      "count": 3,
+                                      "interval": "PT10S",
+                                      "maximumInterval": "PT1M",
+                                      "minimumInterval": "PT5S"
+                                    }
+                                  },
+                                  "runAfter": {
+                                    "Append_Rotated_Record": ["Succeeded"]
+                                  }
+                                },
+                                "Log_Rotation_Error": {
+                                  "type": "AppendToArrayVariable",
+                                  "inputs": {
+                                    "name": "errors",
+                                    "value": {
+                                      "appName": "@{items('For_Each_Application')?['displayName']}",
+                                      "appId": "@{items('For_Each_Application')?['appId']}",
+                                      "operation": "SecretRotation",
+                                      "keyVaultName": "@{body('Parse_Secret_Config')?['keyVaultName']}",
+                                      "error": "Failed to rotate secret or update Key Vault"
+                                    }
+                                  },
+                                  "runAfter": {
+                                    "Create_Rotated_Secret": ["Failed", "TimedOut"],
+                                    "Update_KV_With_Rotated_Secret": ["Failed", "TimedOut"],
+                                    "Remove_Old_Secret": ["Failed", "TimedOut"]
+                                  }
+                                }
+                              },
+                              "else": {
+                                "actions": {}
+                              },
+                              "runAfter": {}
+                            }
+                          }
+                        },
+                        "runAfter": {
+                          "Check_KV_Secret_Exists": ["Succeeded", "Failed"]
+                        }
+                      },
+                      "Log_Parse_Error": {
+                        "type": "AppendToArrayVariable",
+                        "inputs": {
+                          "name": "errors",
+                          "value": {
+                            "appName": "@{items('For_Each_Application')?['displayName']}",
+                            "appId": "@{items('For_Each_Application')?['appId']}",
+                            "operation": "ParseConfig",
+                            "secretDisplayName": "@{items('For_Each_Configured_Secret')?['displayName']}",
+                            "error": "Failed to parse JSON config from secret displayName"
+                          }
+                        },
+                        "runAfter": {
+                          "Parse_Secret_Config": ["Failed"]
+                        }
+                      }
+                    },
+                    "runAfter": {}
+                  }
+                },
+                    "else": {
+                      "actions": {}
+                    },
+                    "runAfter": {
+                      "Filter_Valid_Secrets": ["Succeeded"]
+                    }
+                  }
+                },
+                "else": {
+                  "actions": {
+                    "Append_Unconfigured_App": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "unconfiguredApps",
+                        "value": {
+                          "appName": "@{items('For_Each_Application')?['displayName']}",
+                          "appId": "@{items('For_Each_Application')?['appId']}",
+                          "secretCount": "@{length(coalesce(items('For_Each_Application')?['passwordCredentials'], json('[]')))}"
+                        }
+                      },
+                      "runAfter": {}
+                    }
+                  }
+                },
+                "runAfter": {
+                  "Filter_Configured_Secrets": ["Succeeded"]
+                }
+              }
+            },
+            "runAfter": {
+              "Get_Applications_Page": ["Succeeded"]
+            },
+            "runtimeConfiguration": {
+              "concurrency": {
+                "repetitions": 1
+              }
+            }
+          },
+          "Set_NextLink": {
+            "type": "SetVariable",
+            "inputs": {
+              "name": "nextLink",
+              "value": "@{coalesce(body('Get_Applications_Page')?['@odata.nextLink'], '')}"
+            },
+            "runAfter": {
+              "For_Each_Application": ["Succeeded"]
+            }
+          }
+        },
+        "runAfter": {
+          "Initialize_SecretValidityYears": ["Succeeded"]
+        }
+      }
+    },
+    "parameters": {
+      "expiryThresholdDays": {
+        "defaultValue": "30",
+        "type": "String"
+      },
+      "secretValidityYears": {
+        "defaultValue": "1",
+        "type": "String"
+      }
+    }
+  },
+  "parameters": {
+    "expiryThresholdDays": {
+      "value": "30"
+    },
+    "secretValidityYears": {
+      "value": "1"
+    }
+  }
+}
