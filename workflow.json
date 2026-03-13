@@ -441,30 +441,6 @@
                                     "Update_KV_With_Rotated_Secret": ["Succeeded"]
                                   }
                                 },
-                                "Remove_Old_Secret": {
-                                  "type": "Http",
-                                  "inputs": {
-                                    "method": "POST",
-                                    "uri": "https://graph.microsoft.com/v1.0/applications/@{items('For_Each_Application')?['id']}/removePassword",
-                                    "body": {
-                                      "keyId": "@{items('For_Each_Configured_Secret')?['keyId']}"
-                                    },
-                                    "authentication": {
-                                      "type": "ManagedServiceIdentity",
-                                      "audience": "https://graph.microsoft.com"
-                                    },
-                                    "retryPolicy": {
-                                      "type": "exponential",
-                                      "count": 3,
-                                      "interval": "PT10S",
-                                      "maximumInterval": "PT1M",
-                                      "minimumInterval": "PT5S"
-                                    }
-                                  },
-                                  "runAfter": {
-                                    "Append_Rotated_Record": ["Succeeded"]
-                                  }
-                                },
                                 "Log_Rotation_Error": {
                                   "type": "AppendToArrayVariable",
                                   "inputs": {
@@ -479,8 +455,7 @@
                                   },
                                   "runAfter": {
                                     "Create_Rotated_Secret": ["Failed", "TimedOut"],
-                                    "Update_KV_With_Rotated_Secret": ["Failed", "TimedOut"],
-                                    "Remove_Old_Secret": ["Failed", "TimedOut"]
+                                    "Update_KV_With_Rotated_Secret": ["Failed", "TimedOut"]
                                   }
                                 }
                               },
