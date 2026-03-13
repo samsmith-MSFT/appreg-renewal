@@ -75,7 +75,7 @@ See [Grant-ManagedIdentityPermissions.ps1](Grant-ManagedIdentityPermissions.ps1)
 To enroll an app registration's secret for automatic rotation:
 
 1. Go to **Entra ID** > **App registrations** > select your app > **Certificates & secrets**.
-2. Add a new client secret (or edit an existing one).
+2. Add a new client secret.
 3. Set the **Description** field to:
    ```json
    {"keyVaultName": "your-keyvault-name", "secretName": "desired-secret-name"}
